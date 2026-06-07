@@ -3,20 +3,23 @@ import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 
 export default [
-  { ignores: ["dist"] },
+  { ignores: ["dist/**"] },
   js.configs.recommended,
   {
     files: ["**/*.{js,jsx}"],
     languageOptions: {
       ecmaVersion: 2022,
       globals: {
+        AbortController: "readonly",
         document: "readonly",
         Blob: "readonly",
+        fetch: "readonly",
         FileReader: "readonly",
         localStorage: "readonly",
         navigator: "readonly",
         process: "readonly",
         URL: "readonly",
+        URLSearchParams: "readonly",
         window: "readonly",
       },
       parserOptions: {

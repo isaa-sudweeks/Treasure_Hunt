@@ -6,6 +6,7 @@ import { huntRegion } from "./data/huntRegion";
 import { regionTrails } from "./data/regionTrails";
 import { defaultClues } from "./data/defaultClues";
 import { cellCoverageMeta, tmobileReliableCoverage } from "./data/cellCoverage";
+import { protectedAreas, protectedAreasMeta } from "./data/protectedAreas";
 import {
   boundsToPolygon,
   circleToPolygon,
@@ -17,8 +18,11 @@ import {
   getLinePolygonCoverageRatio,
   getPolygonArea,
   lineIntersectsPolygon,
+  normalizeHeading,
   pointInPolygon,
+  projectPoint,
 } from "./utils/geo";
+import { buildSilhouetteProfile, getSilhouetteCacheKey } from "./utils/elevation";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import "./styles.css";
 
@@ -36,12 +40,17 @@ const blankFilters = {
     showLayer: false,
     requireReliable: false,
   },
+  protectedAreas: {
+    showLayer: true,
+    excludeParks: false,
+  },
 };
 
 const sourceColors = {
   OSM: "#2f7d5b",
   Agency: "#b07324",
 };
+const EMPTY_PROFILE_POINTS = [];
 
 function normalizeFilters(savedFilters) {
   return {
@@ -53,6 +62,10 @@ function normalizeFilters(savedFilters) {
       ...blankFilters.cellService,
       ...savedFilters?.cellService,
     },
+    protectedAreas: {
+      ...blankFilters.protectedAreas,
+      ...savedFilters?.protectedAreas,
+    },
   };
 }
 
@@ -60,10 +73,16 @@ function App() {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const fileInputRef = useRef(null);
+  const silhouetteCacheRef = useRef(new Map());
   const [mapReady, setMapReady] = useState(false);
   const [activeTool, setActiveTool] = useState("inspect");
   const [draftPoints, setDraftPoints] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const [viewpoint, setViewpoint] = useState(null);
+  const [viewHeadingDegrees, setViewHeadingDegrees] = useState(90);
+  const [silhouetteStatus, setSilhouetteStatus] = useState("idle");
+  const [silhouetteProfile, setSilhouetteProfile] = useState(null);
+  const [silhouetteError, setSilhouetteError] = useState("");
   const [exclusions, setExclusions] = useLocalStorage(
     STORAGE_KEYS.exclusions,
     []
@@ -82,6 +101,11 @@ function App() {
     []
   );
 
+  const protectedAreaCollection = useMemo(
+    () => featureCollection(protectedAreas),
+    []
+  );
+
   const enrichedTrails = useMemo(() => {
     return regionTrails.map((trail) => {
       const length = getLineLength(trail.geometry.coordinates);
@@ -95,6 +119,9 @@ function App() {
       );
       const hasReliableCellService =
         cellCoverageRatio >= cellCoverageMeta.minimumTrailCoverage;
+      const intersectsProtectedArea = protectedAreas.some((area) =>
+        trailIntersectsExclusion(trail, area)
+      );
       return {
         ...trail,
         length,
@@ -102,6 +129,7 @@ function App() {
         ruledOut,
         cellCoverageRatio,
         hasReliableCellService,
+        intersectsProtectedArea,
       };
     });
   }, [exclusions]);
@@ -112,6 +140,9 @@ function App() {
       if (!filters.types[trail.properties.type]) return false;
       if (filters.hideRuledOut && trail.ruledOut) return false;
       if (filters.cellService.requireReliable && !trail.hasReliableCellService) {
+        return false;
+      }
+      if (filters.protectedAreas.excludeParks && trail.intersectsProtectedArea) {
         return false;
       }
       return true;
@@ -256,6 +287,32 @@ function App() {
         "trails-line"
       );
 
+      map.addSource("protected-areas", { type: "geojson", data: protectedAreaCollection });
+      map.addLayer(
+        {
+          id: "protected-areas-fill",
+          type: "fill",
+          source: "protected-areas",
+          layout: { visibility: "visible" },
+          paint: { "fill-color": "#6d64b8", "fill-opacity": 0.13 },
+        },
+        "trails-line"
+      );
+      map.addLayer(
+        {
+          id: "protected-areas-line",
+          type: "line",
+          source: "protected-areas",
+          layout: { visibility: "visible" },
+          paint: {
+            "line-color": "#4d4695",
+            "line-width": 2,
+            "line-dasharray": [1, 0.8],
+          },
+        },
+        "trails-line"
+      );
+
       map.addSource("exclusions", { type: "geojson", data: featureCollection([]) });
       map.addLayer({
         id: "exclusions-fill",
@@ -305,6 +362,29 @@ function App() {
         },
       });
 
+      map.addSource("mountain-view", { type: "geojson", data: featureCollection([]) });
+      map.addLayer({
+        id: "mountain-view-heading",
+        type: "line",
+        source: "mountain-view",
+        paint: {
+          "line-color": "#1f3f72",
+          "line-width": 3,
+          "line-dasharray": [1.4, 0.8],
+        },
+      });
+      map.addLayer({
+        id: "mountain-view-point",
+        type: "circle",
+        source: "mountain-view",
+        paint: {
+          "circle-radius": 7,
+          "circle-color": "#ffffff",
+          "circle-stroke-color": "#1f3f72",
+          "circle-stroke-width": 3,
+        },
+      });
+
       map.on("click", "trails-hit", (event) => {
         const feature = event.features?.[0];
         if (feature?.properties?.id) {
@@ -326,7 +406,7 @@ function App() {
       map.remove();
       mapRef.current = null;
     };
-  }, [cellCoverage, huntBoundary]);
+  }, [cellCoverage, huntBoundary, protectedAreaCollection]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -353,6 +433,13 @@ function App() {
     mapRef.current.setLayoutProperty("cell-coverage-fill", "visibility", visibility);
     mapRef.current.setLayoutProperty("cell-coverage-line", "visibility", visibility);
   }, [filters.cellService.showLayer, mapReady]);
+
+  useEffect(() => {
+    if (!mapReady) return;
+    const visibility = filters.protectedAreas.showLayer ? "visible" : "none";
+    mapRef.current.setLayoutProperty("protected-areas-fill", "visibility", visibility);
+    mapRef.current.setLayoutProperty("protected-areas-line", "visibility", visibility);
+  }, [filters.protectedAreas.showLayer, mapReady]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -397,6 +484,77 @@ function App() {
 
   useEffect(() => {
     if (!mapReady) return;
+    const source = mapRef.current.getSource("mountain-view");
+    if (!viewpoint) {
+      source?.setData(featureCollection([]));
+      return;
+    }
+
+    source?.setData(
+      featureCollection([
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              viewpoint,
+              projectPoint(viewpoint, viewHeadingDegrees, 3),
+            ],
+          },
+        },
+        {
+          type: "Feature",
+          properties: {},
+          geometry: { type: "Point", coordinates: viewpoint },
+        },
+      ])
+    );
+  }, [mapReady, viewHeadingDegrees, viewpoint]);
+
+  useEffect(() => {
+    if (!viewpoint) {
+      setSilhouetteStatus("idle");
+      setSilhouetteProfile(null);
+      setSilhouetteError("");
+      return undefined;
+    }
+
+    const cacheKey = getSilhouetteCacheKey(viewpoint, viewHeadingDegrees);
+    const cached = silhouetteCacheRef.current.get(cacheKey);
+    if (cached) {
+      setSilhouetteProfile(cached);
+      setSilhouetteStatus("ready");
+      setSilhouetteError("");
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      setSilhouetteStatus("loading");
+      setSilhouetteError("");
+      buildSilhouetteProfile(viewpoint, viewHeadingDegrees, controller.signal)
+        .then((profile) => {
+          silhouetteCacheRef.current.set(cacheKey, profile);
+          setSilhouetteProfile(profile);
+          setSilhouetteStatus("ready");
+        })
+        .catch((error) => {
+          if (error.name === "AbortError") return;
+          setSilhouetteProfile(null);
+          setSilhouetteStatus("error");
+          setSilhouetteError(error.message);
+        });
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [viewHeadingDegrees, viewpoint]);
+
+  useEffect(() => {
+    if (!mapReady) return;
     const map = mapRef.current;
     const handleMapClick = (event) => {
       const point = [event.lngLat.lng, event.lngLat.lat];
@@ -410,6 +568,13 @@ function App() {
       }
       if (activeTool === "polygon") {
         setDraftPoints((current) => [...current, point]);
+      }
+      if (activeTool === "mountain") {
+        setViewpoint(point);
+        setSilhouetteStatus("loading");
+        setSilhouetteProfile(null);
+        setSilhouetteError("");
+        map.easeTo({ center: point, duration: 500 });
       }
     };
     map.on("click", handleMapClick);
@@ -596,6 +761,14 @@ function App() {
               label="Marker"
               onClick={() => setActiveTool("marker")}
             />
+            <ToolButton
+              active={activeTool === "mountain"}
+              label="Mountain View"
+              onClick={() => {
+                setActiveTool("mountain");
+                clearDraft();
+              }}
+            />
           </div>
         </div>
 
@@ -607,6 +780,9 @@ function App() {
             <span><i className="legend-swatch agency" /> Agency trails</span>
             {filters.cellService.showLayer && (
               <span><i className="legend-swatch cell" /> T-Mobile service</span>
+            )}
+            {filters.protectedAreas.showLayer && (
+              <span><i className="legend-swatch protected" /> State/national parks</span>
             )}
             <span><i className="legend-swatch excluded" /> Ruled out</span>
           </div>
@@ -621,6 +797,21 @@ function App() {
                 Clear
               </button>
             </div>
+          )}
+          {viewpoint && (
+            <SilhouetteViewer
+              headingDegrees={viewHeadingDegrees}
+              profile={silhouetteProfile}
+              status={silhouetteStatus}
+              error={silhouetteError}
+              viewpoint={viewpoint}
+              onClose={() => {
+                setViewpoint(null);
+                setSilhouetteProfile(null);
+                setSilhouetteStatus("idle");
+              }}
+              onHeadingChange={setViewHeadingDegrees}
+            />
           )}
         </div>
       </main>
@@ -733,6 +924,48 @@ function App() {
             </label>
             <p className="filter-note">{cellCoverageMeta.note}</p>
           </fieldset>
+          <fieldset className="divider">
+            <legend>State and national parks</legend>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={filters.protectedAreas.showLayer}
+                onChange={(event) =>
+                  setSavedFilters((current) => {
+                    const normalized = normalizeFilters(current);
+                    return {
+                      ...normalized,
+                      protectedAreas: {
+                        ...normalized.protectedAreas,
+                        showLayer: event.target.checked,
+                      },
+                    };
+                  })
+                }
+              />
+              <span>Show park layer</span>
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={filters.protectedAreas.excludeParks}
+                onChange={(event) =>
+                  setSavedFilters((current) => {
+                    const normalized = normalizeFilters(current);
+                    return {
+                      ...normalized,
+                      protectedAreas: {
+                        ...normalized.protectedAreas,
+                        excludeParks: event.target.checked,
+                      },
+                    };
+                  })
+                }
+              />
+              <span>Exclude park trails</span>
+            </label>
+            <p className="filter-note">{protectedAreasMeta.note}</p>
+          </fieldset>
         </section>
 
         <section className="panel detail-panel">
@@ -772,6 +1005,152 @@ function App() {
         </section>
       </aside>
     </div>
+  );
+}
+
+function SilhouetteViewer({
+  headingDegrees,
+  profile,
+  status,
+  error,
+  viewpoint,
+  onClose,
+  onHeadingChange,
+}) {
+  const dragXRef = useRef(null);
+  const points = profile?.profile || EMPTY_PROFILE_POINTS;
+  const angleRange = useMemo(() => {
+    if (!points.length) return { min: -2, max: 10 };
+    const values = points.map((point) => point.angleDegrees);
+    return {
+      min: Math.min(-2, Math.min(...values) - 1),
+      max: Math.max(8, Math.max(...values) + 1),
+    };
+  }, [points]);
+  const skylinePath = useMemo(() => {
+    if (!points.length) return "";
+    const width = 420;
+    const height = 150;
+    const xStep = width / Math.max(points.length - 1, 1);
+    const yScale = height / Math.max(angleRange.max - angleRange.min, 1);
+    return points
+      .map((point, index) => {
+        const x = index * xStep;
+        const y = height - (point.angleDegrees - angleRange.min) * yScale;
+        return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+      })
+      .join(" ");
+  }, [angleRange, points]);
+
+  const updateHeading = (nextHeading) => onHeadingChange(normalizeHeading(nextHeading));
+  const handleProfilePointerDown = (event) => {
+    dragXRef.current = event.clientX;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const handleProfilePointerMove = (event) => {
+    if (dragXRef.current == null) return;
+    const deltaX = event.clientX - dragXRef.current;
+    if (Math.abs(deltaX) < 2) return;
+    updateHeading(headingDegrees + deltaX * 0.35);
+    dragXRef.current = event.clientX;
+  };
+  const stopDragging = () => {
+    dragXRef.current = null;
+  };
+  const handleCompassPointer = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const dx = event.clientX - centerX;
+    const dy = event.clientY - centerY;
+    updateHeading((Math.atan2(dx, -dy) * 180) / Math.PI);
+  };
+
+  return (
+    <section className="map-floating silhouette-panel" aria-label="Mountain silhouette viewer">
+      <div className="silhouette-heading">
+        <div>
+          <h2>Mountain View</h2>
+          <p>
+            {viewpoint[1].toFixed(4)}, {viewpoint[0].toFixed(4)} ·{" "}
+            {Math.round(normalizeHeading(headingDegrees))}° {formatHeading(headingDegrees)}
+          </p>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close mountain view">
+          Close
+        </button>
+      </div>
+
+      <div className="silhouette-body">
+        <div className="silhouette-chart">
+          <svg
+            viewBox="0 0 420 170"
+            role="img"
+            aria-label="Approximate skyline profile"
+            onPointerDown={handleProfilePointerDown}
+            onPointerMove={handleProfilePointerMove}
+            onPointerUp={stopDragging}
+            onPointerCancel={stopDragging}
+          >
+            <rect width="420" height="170" rx="6" className="skyline-sky" />
+            <path d="M 0 150 L 420 150" className="skyline-horizon" />
+            {points.length ? (
+              <>
+                <path
+                  d={`${skylinePath} L 420 170 L 0 170 Z`}
+                  className="skyline-fill"
+                />
+                <path d={skylinePath} className="skyline-line" />
+              </>
+            ) : (
+              <path d="M 0 142 L 420 142" className="skyline-line muted" />
+            )}
+          </svg>
+          <div className="silhouette-status">
+            {status === "idle" && "Pick a map point to generate a skyline."}
+            {status === "loading" && "Sampling Open-Meteo elevation..."}
+            {status === "ready" &&
+              `${points.length} bearings · observer ${Math.round(profile.originElevation)} m`}
+            {status === "error" && (error || "Could not generate this skyline.")}
+          </div>
+          <p className="silhouette-attribution">
+            Elevation data: Open-Meteo and Copernicus DEM GLO-90.
+          </p>
+        </div>
+
+        <div className="compass-stack">
+          <button
+            type="button"
+            className="compass"
+            aria-label="Set viewing direction"
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              handleCompassPointer(event);
+            }}
+            onPointerMove={(event) => {
+              if (event.buttons) handleCompassPointer(event);
+            }}
+          >
+            <span className="compass-label north">N</span>
+            <span className="compass-label east">E</span>
+            <span className="compass-label south">S</span>
+            <span className="compass-label west">W</span>
+            <span
+              className="compass-needle"
+              style={{ transform: `translate(-50%, -100%) rotate(${headingDegrees}deg)` }}
+            />
+          </button>
+          <div className="heading-actions">
+            <button type="button" onClick={() => updateHeading(headingDegrees - 10)}>
+              Left
+            </button>
+            <button type="button" onClick={() => updateHeading(headingDegrees + 10)}>
+              Right
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -881,6 +1260,12 @@ function FeatureDetails({ feature }) {
           {" · "}
           {Math.round(feature.cellCoverageRatio * 100)}% sampled coverage
         </dd>
+        <dt>Parks</dt>
+        <dd>
+          {feature.intersectsProtectedArea
+            ? "Touches a state or national park area"
+            : "No park overlap"}
+        </dd>
       </dl>
     );
   }
@@ -908,6 +1293,18 @@ function trailIntersectsExclusion(trail, exclusion) {
   return trail.geometry.coordinates.some((point) =>
     pointInPolygon(point, exclusion.geometry.coordinates[0])
   );
+}
+
+function formatHeading(degrees) {
+  const normalized = normalizeHeading(degrees);
+  if (normalized >= 337.5 || normalized < 22.5) return "N";
+  if (normalized < 67.5) return "NE";
+  if (normalized < 112.5) return "E";
+  if (normalized < 157.5) return "SE";
+  if (normalized < 202.5) return "S";
+  if (normalized < 247.5) return "SW";
+  if (normalized < 292.5) return "W";
+  return "NW";
 }
 
 createRoot(document.getElementById("root")).render(<App />);

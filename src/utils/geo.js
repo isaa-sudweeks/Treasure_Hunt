@@ -48,6 +48,47 @@ export function getLineLength(coordinates) {
   }, 0);
 }
 
+export function distanceMiles(a, b) {
+  const lat1 = toRadians(a[1]);
+  const lat2 = toRadians(b[1]);
+  const deltaLat = toRadians(b[1] - a[1]);
+  const deltaLng = toRadians(b[0] - a[0]);
+  const haversine =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) ** 2;
+  return EARTH_RADIUS_MILES * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+export function normalizeHeading(degrees) {
+  return ((degrees % 360) + 360) % 360;
+}
+
+export function projectPoint(origin, bearingDegrees, distanceInMiles) {
+  const [lng, lat] = origin;
+  const angularDistance = distanceInMiles / EARTH_RADIUS_MILES;
+  const bearing = toRadians(bearingDegrees);
+  const lat1 = toRadians(lat);
+  const lng1 = toRadians(lng);
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance) +
+      Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing)
+  );
+  const lng2 =
+    lng1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+      Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2)
+    );
+
+  return [toDegrees(lng2), toDegrees(lat2)];
+}
+
+export function apparentElevationAngle(originElevationMeters, targetElevationMeters, distanceInMiles) {
+  const runMeters = Math.max(distanceInMiles * 1609.344, 1);
+  return toDegrees(Math.atan2(targetElevationMeters - originElevationMeters, runMeters));
+}
+
 export function getPolygonArea(ring) {
   if (!ring?.length) return 0;
   const lat = ring.reduce((sum, point) => sum + point[1], 0) / ring.length;
@@ -150,19 +191,12 @@ export function formatArea(squareMiles) {
   return `${squareMiles.toFixed(2)} sq mi`;
 }
 
-function distanceMiles(a, b) {
-  const lat1 = toRadians(a[1]);
-  const lat2 = toRadians(b[1]);
-  const deltaLat = toRadians(b[1] - a[1]);
-  const deltaLng = toRadians(b[0] - a[0]);
-  const haversine =
-    Math.sin(deltaLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) ** 2;
-  return EARTH_RADIUS_MILES * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-}
-
 function toRadians(degrees) {
   return (degrees * Math.PI) / 180;
+}
+
+function toDegrees(radians) {
+  return (radians * 180) / Math.PI;
 }
 
 function segmentsIntersect(a, b, c, d) {

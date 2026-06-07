@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "lint": "eslint ."
+    "lint": "eslint src eslint.config.js vite.config.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",

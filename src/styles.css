@@ -64,6 +64,10 @@ button:disabled {
   overflow: auto;
 }
 
+.inspector > .panel {
+  flex: 0 0 auto;
+}
+
 .brand-block {
   display: flex;
   align-items: flex-start;
@@ -381,6 +385,12 @@ button:disabled {
   background: rgba(210, 59, 191, 0.24);
 }
 
+.legend-swatch.protected {
+  height: 12px;
+  border: 1px dashed #4d4695;
+  background: rgba(109, 100, 184, 0.22);
+}
+
 .legend-swatch.excluded {
   height: 12px;
   background: rgba(214, 84, 69, 0.42);
@@ -398,6 +408,184 @@ button:disabled {
 .draw-help span {
   color: #63736a;
   font-size: 12px;
+}
+
+.silhouette-panel {
+  right: 14px;
+  bottom: 22px;
+  display: grid;
+  gap: 12px;
+  width: min(620px, calc(100% - 28px));
+  padding: 12px;
+}
+
+.silhouette-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.silhouette-heading h2 {
+  margin: 0 0 3px;
+  font-size: 15px;
+}
+
+.silhouette-heading p {
+  margin: 0;
+  color: #66756d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.silhouette-heading button,
+.heading-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #ccd7cf;
+  border-radius: 6px;
+  color: #253329;
+  background: #f6f8f5;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.silhouette-heading button:hover,
+.heading-actions button:hover {
+  background: #ebf0eb;
+}
+
+.silhouette-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: 12px;
+  align-items: center;
+}
+
+.silhouette-chart {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.silhouette-chart svg {
+  display: block;
+  width: 100%;
+  min-height: 170px;
+  touch-action: none;
+  cursor: ew-resize;
+}
+
+.skyline-sky {
+  fill: #eef5f3;
+}
+
+.skyline-horizon {
+  stroke: rgba(36, 81, 60, 0.28);
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+
+.skyline-fill {
+  fill: rgba(45, 78, 63, 0.26);
+}
+
+.skyline-line {
+  fill: none;
+  stroke: #193a2b;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.skyline-line.muted {
+  stroke: rgba(25, 58, 43, 0.34);
+}
+
+.silhouette-status {
+  min-height: 17px;
+  color: #5f6d65;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.silhouette-attribution {
+  margin: -3px 0 0;
+  color: #7a877f;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.compass-stack {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.compass {
+  position: relative;
+  width: 96px;
+  aspect-ratio: 1;
+  border: 1px solid #cbd8d1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, #ffffff 0 45%, #edf3f0 46% 100%);
+  color: #253329;
+  touch-action: none;
+}
+
+.compass::before {
+  position: absolute;
+  inset: 12px;
+  border: 1px solid #d7dfd9;
+  border-radius: 50%;
+  content: "";
+}
+
+.compass-label {
+  position: absolute;
+  color: #607068;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.compass-label.north {
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.compass-label.east {
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+}
+
+.compass-label.south {
+  bottom: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.compass-label.west {
+  top: 50%;
+  left: 8px;
+  transform: translateY(-50%);
+}
+
+.compass-needle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 34px;
+  border-radius: 999px;
+  background: #1f3f72;
+  transform-origin: 50% 100%;
+}
+
+.heading-actions {
+  display: flex;
+  gap: 6px;
 }
 
 fieldset {
@@ -534,6 +722,31 @@ legend {
 
   .tool-group {
     flex-wrap: wrap;
+  }
+
+  .legend {
+    position: static;
+    margin: 10px;
+    width: calc(100% - 20px);
+  }
+
+  .silhouette-panel {
+    right: 10px;
+    bottom: 10px;
+    width: calc(100% - 20px);
+  }
+
+  .silhouette-body {
+    grid-template-columns: 1fr;
+  }
+
+  .compass-stack {
+    grid-template-columns: 96px auto;
+    justify-content: start;
+  }
+
+  .heading-actions {
+    align-self: center;
   }
 
   .inspector {
