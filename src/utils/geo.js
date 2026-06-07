@@ -109,6 +109,37 @@ export function lineIntersectsPolygon(line, ring) {
   return false;
 }
 
+export function getLinePolygonCoverageRatio(line, polygons, sampleSpacingMiles = 0.25) {
+  const samples = [];
+
+  line.forEach((point, index) => {
+    if (index === 0) {
+      samples.push(point);
+      return;
+    }
+
+    const previous = line[index - 1];
+    const segmentLength = distanceMiles(previous, point);
+    const steps = Math.max(1, Math.ceil(segmentLength / sampleSpacingMiles));
+
+    for (let step = 1; step <= steps; step += 1) {
+      const ratio = step / steps;
+      samples.push([
+        previous[0] + (point[0] - previous[0]) * ratio,
+        previous[1] + (point[1] - previous[1]) * ratio,
+      ]);
+    }
+  });
+
+  if (!samples.length) return 0;
+
+  const coveredSamples = samples.filter((point) =>
+    polygons.some((polygon) => pointInPolygon(point, polygon.geometry.coordinates[0]))
+  ).length;
+
+  return coveredSamples / samples.length;
+}
+
 export function formatDistance(miles) {
   if (miles < 0.1) return `${Math.round(miles * 5280)} ft`;
   return `${miles.toFixed(1)} mi`;

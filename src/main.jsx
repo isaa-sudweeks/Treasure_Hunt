@@ -5,6 +5,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { huntRegion } from "./data/huntRegion";
 import { regionTrails } from "./data/regionTrails";
 import { defaultClues } from "./data/defaultClues";
+import { cellCoverageMeta, tmobileReliableCoverage } from "./data/cellCoverage";
 import {
   boundsToPolygon,
   circleToPolygon,
@@ -13,6 +14,7 @@ import {
   formatDistance,
   getFeatureCenter,
   getLineLength,
+  getLinePolygonCoverageRatio,
   getPolygonArea,
   lineIntersectsPolygon,
   pointInPolygon,
@@ -30,12 +32,29 @@ const blankFilters = {
   sources: { OSM: true },
   types: { hike: true, bike: true, service: true, overlook: true },
   hideRuledOut: false,
+  cellService: {
+    showLayer: false,
+    requireReliable: false,
+  },
 };
 
 const sourceColors = {
   OSM: "#2f7d5b",
   Agency: "#b07324",
 };
+
+function normalizeFilters(savedFilters) {
+  return {
+    ...blankFilters,
+    ...savedFilters,
+    sources: { ...blankFilters.sources, ...savedFilters?.sources },
+    types: { ...blankFilters.types, ...savedFilters?.types },
+    cellService: {
+      ...blankFilters.cellService,
+      ...savedFilters?.cellService,
+    },
+  };
+}
 
 function App() {
   const mapContainerRef = useRef(null);
@@ -50,10 +69,16 @@ function App() {
     []
   );
   const [clues, setClues] = useLocalStorage(STORAGE_KEYS.clues, defaultClues);
-  const [filters, setFilters] = useLocalStorage(STORAGE_KEYS.filters, blankFilters);
+  const [savedFilters, setSavedFilters] = useLocalStorage(STORAGE_KEYS.filters, blankFilters);
+  const filters = useMemo(() => normalizeFilters(savedFilters), [savedFilters]);
 
   const huntBoundary = useMemo(
     () => boundsToPolygon(huntRegion.bounds, huntRegion.name),
+    []
+  );
+
+  const cellCoverage = useMemo(
+    () => featureCollection(tmobileReliableCoverage),
     []
   );
 
@@ -64,7 +89,20 @@ function App() {
       const ruledOut = exclusions.some((exclusion) =>
         trailIntersectsExclusion(trail, exclusion)
       );
-      return { ...trail, length, center, ruledOut };
+      const cellCoverageRatio = getLinePolygonCoverageRatio(
+        trail.geometry.coordinates,
+        tmobileReliableCoverage
+      );
+      const hasReliableCellService =
+        cellCoverageRatio >= cellCoverageMeta.minimumTrailCoverage;
+      return {
+        ...trail,
+        length,
+        center,
+        ruledOut,
+        cellCoverageRatio,
+        hasReliableCellService,
+      };
     });
   }, [exclusions]);
 
@@ -73,6 +111,9 @@ function App() {
       if (!filters.sources[trail.properties.source]) return false;
       if (!filters.types[trail.properties.type]) return false;
       if (filters.hideRuledOut && trail.ruledOut) return false;
+      if (filters.cellService.requireReliable && !trail.hasReliableCellService) {
+        return false;
+      }
       return true;
     });
   }, [enrichedTrails, filters]);
@@ -91,11 +132,15 @@ function App() {
       0
     );
     const ruledOutTrails = enrichedTrails.filter((trail) => trail.ruledOut).length;
+    const noCellTrails = enrichedTrails.filter(
+      (trail) => !trail.hasReliableCellService
+    ).length;
     const unresolvedClues = clues.filter((clue) => clue.status === "unresolved").length;
     return {
       trails: filteredTrails.length,
       excludedArea,
       remaining: Math.max(enrichedTrails.length - ruledOutTrails, 0),
+      reliableCell: Math.max(enrichedTrails.length - noCellTrails, 0),
       unresolvedClues,
     };
   }, [clues, enrichedTrails, exclusions, filteredTrails.length]);
@@ -185,6 +230,32 @@ function App() {
         paint: { "line-color": "#000000", "line-width": 14, "line-opacity": 0 },
       });
 
+      map.addSource("cell-coverage", { type: "geojson", data: cellCoverage });
+      map.addLayer(
+        {
+          id: "cell-coverage-fill",
+          type: "fill",
+          source: "cell-coverage",
+          layout: { visibility: "none" },
+          paint: { "fill-color": "#d23bbf", "fill-opacity": 0.16 },
+        },
+        "trails-line"
+      );
+      map.addLayer(
+        {
+          id: "cell-coverage-line",
+          type: "line",
+          source: "cell-coverage",
+          layout: { visibility: "none" },
+          paint: {
+            "line-color": "#9d2590",
+            "line-width": 2,
+            "line-dasharray": [1.3, 1],
+          },
+        },
+        "trails-line"
+      );
+
       map.addSource("exclusions", { type: "geojson", data: featureCollection([]) });
       map.addLayer({
         id: "exclusions-fill",
@@ -255,7 +326,7 @@ function App() {
       map.remove();
       mapRef.current = null;
     };
-  }, [huntBoundary]);
+  }, [cellCoverage, huntBoundary]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -269,11 +340,19 @@ function App() {
             id: trail.id,
             lineColor: sourceColors[trail.properties.source],
             ruledOut: trail.ruledOut,
+            hasReliableCellService: trail.hasReliableCellService,
           },
         }))
       )
     );
   }, [filteredTrails, mapReady]);
+
+  useEffect(() => {
+    if (!mapReady) return;
+    const visibility = filters.cellService.showLayer ? "visible" : "none";
+    mapRef.current.setLayoutProperty("cell-coverage-fill", "visibility", visibility);
+    mapRef.current.setLayoutProperty("cell-coverage-line", "visibility", visibility);
+  }, [filters.cellService.showLayer, mapReady]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -425,7 +504,7 @@ function App() {
           <Metric label="Visible trails" value={stats.trails} />
           <Metric label="Excluded area" value={formatArea(stats.excludedArea)} />
           <Metric label="Candidates" value={stats.remaining} />
-          <Metric label="Open clues" value={stats.unresolvedClues} />
+          <Metric label="Cell service" value={stats.reliableCell} />
         </section>
 
         <section className="panel">
@@ -526,6 +605,9 @@ function App() {
             <span><i className="legend-swatch region" /> Hunt region</span>
             <span><i className="legend-swatch osm" /> OSM trails</span>
             <span><i className="legend-swatch agency" /> Agency trails</span>
+            {filters.cellService.showLayer && (
+              <span><i className="legend-swatch cell" /> T-Mobile service</span>
+            )}
             <span><i className="legend-swatch excluded" /> Ruled out</span>
           </div>
           {activeTool === "polygon" && (
@@ -556,10 +638,16 @@ function App() {
                   type="checkbox"
                   checked={filters.sources[source]}
                   onChange={(event) =>
-                    setFilters((current) => ({
-                      ...current,
-                      sources: { ...current.sources, [source]: event.target.checked },
-                    }))
+                    setSavedFilters((current) => {
+                      const normalized = normalizeFilters(current);
+                      return {
+                        ...normalized,
+                        sources: {
+                          ...normalized.sources,
+                          [source]: event.target.checked,
+                        },
+                      };
+                    })
                   }
                 />
                 <span>{source}</span>
@@ -574,10 +662,16 @@ function App() {
                   type="checkbox"
                   checked={filters.types[type]}
                   onChange={(event) =>
-                    setFilters((current) => ({
-                      ...current,
-                      types: { ...current.types, [type]: event.target.checked },
-                    }))
+                    setSavedFilters((current) => {
+                      const normalized = normalizeFilters(current);
+                      return {
+                        ...normalized,
+                        types: {
+                          ...normalized.types,
+                          [type]: event.target.checked,
+                        },
+                      };
+                    })
                   }
                 />
                 <span>{type}</span>
@@ -589,14 +683,56 @@ function App() {
               type="checkbox"
               checked={filters.hideRuledOut}
               onChange={(event) =>
-                setFilters((current) => ({
-                  ...current,
+                setSavedFilters((current) => ({
+                  ...normalizeFilters(current),
                   hideRuledOut: event.target.checked,
                 }))
               }
             />
             <span>Hide ruled-out trails</span>
           </label>
+          <fieldset className="divider">
+            <legend>Cell service</legend>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={filters.cellService.showLayer}
+                onChange={(event) =>
+                  setSavedFilters((current) => {
+                    const normalized = normalizeFilters(current);
+                    return {
+                      ...normalized,
+                      cellService: {
+                        ...normalized.cellService,
+                        showLayer: event.target.checked,
+                      },
+                    };
+                  })
+                }
+              />
+              <span>Show T-Mobile layer</span>
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={filters.cellService.requireReliable}
+                onChange={(event) =>
+                  setSavedFilters((current) => {
+                    const normalized = normalizeFilters(current);
+                    return {
+                      ...normalized,
+                      cellService: {
+                        ...normalized.cellService,
+                        requireReliable: event.target.checked,
+                      },
+                    };
+                  })
+                }
+              />
+              <span>Require reliable service</span>
+            </label>
+            <p className="filter-note">{cellCoverageMeta.note}</p>
+          </fieldset>
         </section>
 
         <section className="panel detail-panel">
@@ -739,6 +875,12 @@ function FeatureDetails({ feature }) {
         <dd>{formatDistance(feature.length)}</dd>
         <dt>Status</dt>
         <dd>{feature.ruledOut ? "Touches a ruled-out area" : "Still in candidate set"}</dd>
+        <dt>Cell</dt>
+        <dd>
+          {feature.hasReliableCellService ? "Reliable T-Mobile area" : "Limited T-Mobile area"}
+          {" · "}
+          {Math.round(feature.cellCoverageRatio * 100)}% sampled coverage
+        </dd>
       </dl>
     );
   }

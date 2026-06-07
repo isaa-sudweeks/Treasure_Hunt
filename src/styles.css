@@ -61,6 +61,7 @@ button:disabled {
 
 .inspector {
   border-left: 1px solid #d6ddd4;
+  overflow: auto;
 }
 
 .brand-block {
@@ -374,6 +375,12 @@ button:disabled {
   background: #b07324;
 }
 
+.legend-swatch.cell {
+  height: 12px;
+  border: 1px dashed #9d2590;
+  background: rgba(210, 59, 191, 0.24);
+}
+
 .legend-swatch.excluded {
   height: 12px;
   background: rgba(214, 84, 69, 0.42);
@@ -425,6 +432,13 @@ legend {
 .divider {
   padding-top: 10px;
   border-top: 1px solid #e1e7df;
+}
+
+.filter-note {
+  margin: 8px 0 0;
+  color: #6c786f;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .detail-panel {
