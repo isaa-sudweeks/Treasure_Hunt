@@ -1,152 +1,88 @@
-import {
-  apparentElevationAngle,
-  normalizeHeading,
-  projectPoint,
-} from "./geo";
+import { normalizeHeading } from "./geo";
 
-const ELEVATION_ENDPOINT = "https://api.open-meteo.com/v1/elevation";
-const FOV_DEGREES = 80;
-const RAY_STEP_DEGREES = 4;
-const REQUEST_CHUNK_SIZE = 90;
-const CHUNK_DELAY_MS = 1150;
+export const silhouetteQualityOptions = {
+  preview: {
+    label: "Preview",
+    bearingStepDegrees: 2,
+    distanceStepMiles: 1.25,
+    chunkSize: 12,
+  },
+  balanced: {
+    label: "Balanced",
+    bearingStepDegrees: 1,
+    distanceStepMiles: 0.75,
+    chunkSize: 10,
+  },
+  high: {
+    label: "High",
+    bearingStepDegrees: 0.5,
+    distanceStepMiles: 0.4,
+    chunkSize: 8,
+  },
+  export: {
+    label: "Export",
+    bearingStepDegrees: 0.25,
+    distanceStepMiles: 0.25,
+    chunkSize: 6,
+  },
+};
 
-const distanceSamples = [
-  ...Array.from({ length: 10 }, (_, index) => 0.5 + index * 0.5),
-  7,
-  10,
-  14,
-  18,
-  23,
-  30,
-];
-
-export function getSilhouetteCacheKey(viewpoint, headingDegrees) {
+export function getSilhouetteCacheKey({
+  viewpoint,
+  headingDegrees,
+  fovDegrees,
+  maxDistanceMiles,
+  quality,
+}) {
   return [
+    "v4",
     viewpoint[0].toFixed(4),
     viewpoint[1].toFixed(4),
     Math.round(normalizeHeading(headingDegrees)),
+    Math.round(fovDegrees),
+    Math.round(maxDistanceMiles),
+    quality,
   ].join(":");
 }
 
-export async function buildSilhouetteProfile(viewpoint, headingDegrees, signal) {
-  const rays = buildSampleRays(viewpoint, headingDegrees);
-  const locations = [
-    { coordinate: viewpoint, meta: { kind: "origin" } },
-    ...rays.flatMap((ray, rayIndex) =>
-      ray.samples.map((sample, sampleIndex) => ({
-        coordinate: sample.coordinate,
-        meta: { kind: "sample", rayIndex, sampleIndex },
-      }))
-    ),
-  ];
-  const results = await fetchElevationChunks(locations, signal);
-  const originElevation = results[0]?.elevation;
+export function createSilhouetteWorker() {
+  return new globalThis.Worker(new URL("../workers/silhouette.worker.js", import.meta.url), {
+    type: "module",
+  });
+}
 
-  if (originElevation == null) {
-    throw new Error("OpenTopoData did not return elevation for the selected point.");
+export function filterProfilePoints(points, depthFilter) {
+  if (depthFilter === "all") return points;
+  if (depthFilter === "foreground") {
+    return points.filter((point) => !point.isGap && point.distanceMiles <= 18);
   }
-
-  const profile = rays.map((ray) => {
-    const visible = ray.samples.reduce(
-      (highest, sample) => {
-        const elevation = results[sample.resultIndex]?.elevation;
-        if (elevation == null) return highest;
-        const angle = apparentElevationAngle(originElevation, elevation, sample.distanceMiles);
-        if (!highest || angle > highest.angleDegrees) {
-          return {
-            angleDegrees: angle,
-            bearingDegrees: ray.bearingDegrees,
-            distanceMiles: sample.distanceMiles,
-            elevationMeters: elevation,
-          };
-        }
-        return highest;
-      },
-      null
+  if (depthFilter === "midground") {
+    return points.filter(
+      (point) => !point.isGap && point.distanceMiles > 18 && point.distanceMiles <= 45
     );
-
-    return (
-      visible || {
-        angleDegrees: 0,
-        bearingDegrees: ray.bearingDegrees,
-        distanceMiles: 0,
-        elevationMeters: originElevation,
-      }
-    );
-  });
-
-  return {
-    generatedAt: new Date().toISOString(),
-    headingDegrees: normalizeHeading(headingDegrees),
-    originElevation,
-    profile,
-  };
-}
-
-function buildSampleRays(viewpoint, headingDegrees) {
-  const startBearing = headingDegrees - FOV_DEGREES / 2;
-  let resultIndex = 1;
-  return Array.from({ length: FOV_DEGREES / RAY_STEP_DEGREES + 1 }, (_, index) => {
-    const bearingDegrees = normalizeHeading(startBearing + index * RAY_STEP_DEGREES);
-    const samples = distanceSamples.map((distanceMiles) => ({
-      coordinate: projectPoint(viewpoint, bearingDegrees, distanceMiles),
-      distanceMiles,
-      resultIndex: resultIndex++,
-    }));
-    return { bearingDegrees, samples };
-  });
-}
-
-async function fetchElevationChunks(locations, signal) {
-  const results = [];
-
-  for (let index = 0; index < locations.length; index += REQUEST_CHUNK_SIZE) {
-    const chunk = locations.slice(index, index + REQUEST_CHUNK_SIZE);
-    const params = new URLSearchParams({
-      latitude: chunk.map(({ coordinate }) => coordinate[1].toFixed(6)).join(","),
-      longitude: chunk.map(({ coordinate }) => coordinate[0].toFixed(6)).join(","),
-    });
-    const response = await fetch(`${ELEVATION_ENDPOINT}?${params}`, { signal });
-
-    if (!response.ok) {
-      throw new Error(`Open-Meteo elevation request failed with ${response.status}.`);
-    }
-
-    const parsed = await response.json();
-    if (parsed.error) {
-      throw new Error(parsed.reason || "Open-Meteo could not build the skyline profile.");
-    }
-
-    results.push(
-      ...parsed.elevation.map((elevation, resultIndex) => ({
-        elevation,
-        location: {
-          lat: chunk[resultIndex].coordinate[1],
-          lng: chunk[resultIndex].coordinate[0],
-        },
-      }))
-    );
-
-    if (index + REQUEST_CHUNK_SIZE < locations.length) {
-      await delay(CHUNK_DELAY_MS, signal);
-    }
   }
-
-  return results;
+  if (depthFilter === "background") {
+    return points.filter((point) => !point.isGap && point.distanceMiles > 45);
+  }
+  if (depthFilter === "major") {
+    return points.filter((point) => !point.isGap && point.isInteresting);
+  }
+  return points;
 }
 
-function delay(milliseconds, signal) {
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timeout);
-        const error = new Error("Request aborted");
-        error.name = "AbortError";
-        reject(error);
-      },
-      { once: true }
-    );
-  });
+export function getDepthColor(distanceMiles, elevationMeters) {
+  const elevationBoost = Math.min(Math.max((elevationMeters - 1200) / 2300, 0), 1);
+  if (distanceMiles <= 18) {
+    return elevationBoost > 0.55 ? "#c85f2d" : "#d9843f";
+  }
+  if (distanceMiles <= 45) {
+    return elevationBoost > 0.55 ? "#397a5f" : "#4f8d67";
+  }
+  return elevationBoost > 0.55 ? "#4d75b8" : "#6e8ec7";
+}
+
+export function getDepthLabel(distanceMiles) {
+  if (distanceMiles <= 18) return "Near mountains";
+  if (distanceMiles <= 45) return "Mid mountains";
+  return "Background";
 }

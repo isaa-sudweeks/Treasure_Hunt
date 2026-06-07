@@ -22,7 +22,14 @@ import {
   pointInPolygon,
   projectPoint,
 } from "./utils/geo";
-import { buildSilhouetteProfile, getSilhouetteCacheKey } from "./utils/elevation";
+import {
+  createSilhouetteWorker,
+  filterProfilePoints,
+  getDepthColor,
+  getDepthLabel,
+  getSilhouetteCacheKey,
+  silhouetteQualityOptions,
+} from "./utils/elevation";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import "./styles.css";
 
@@ -30,6 +37,7 @@ const STORAGE_KEYS = {
   exclusions: "treasure-hunt.exclusions.v1",
   clues: "treasure-hunt.clues.v1",
   filters: "treasure-hunt.filters.v1",
+  basemap: "treasure-hunt.basemap.v1",
 };
 
 const blankFilters = {
@@ -51,6 +59,39 @@ const sourceColors = {
   Agency: "#b07324",
 };
 const EMPTY_PROFILE_POINTS = [];
+const BASEMAPS = {
+  street: {
+    label: "Street",
+    tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  },
+  topo: {
+    label: "Topo",
+    tiles: [
+      "https://a.tile.opentopomap.org/{z}/{x}/{y}.png",
+      "https://b.tile.opentopomap.org/{z}/{x}/{y}.png",
+      "https://c.tile.opentopomap.org/{z}/{x}/{y}.png",
+    ],
+    attribution:
+      'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a>',
+  },
+  satellite: {
+    label: "Satellite",
+    tiles: [
+      "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    ],
+    attribution:
+      "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+  },
+};
+const DEFAULT_SILHOUETTE_SETTINGS = {
+  fovDegrees: 70,
+  maxDistanceMiles: 80,
+  quality: "balanced",
+  depthFilter: "all",
+  showOccluded: false,
+};
 
 function normalizeFilters(savedFilters) {
   return {
@@ -80,16 +121,36 @@ function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [viewpoint, setViewpoint] = useState(null);
   const [viewHeadingDegrees, setViewHeadingDegrees] = useState(90);
+  const [viewFovDegrees, setViewFovDegrees] = useState(
+    DEFAULT_SILHOUETTE_SETTINGS.fovDegrees
+  );
+  const [viewMaxDistanceMiles, setViewMaxDistanceMiles] = useState(
+    DEFAULT_SILHOUETTE_SETTINGS.maxDistanceMiles
+  );
+  const [silhouetteQuality, setSilhouetteQuality] = useState(
+    DEFAULT_SILHOUETTE_SETTINGS.quality
+  );
+  const [silhouetteDepthFilter, setSilhouetteDepthFilter] = useState(
+    DEFAULT_SILHOUETTE_SETTINGS.depthFilter
+  );
+  const [showOccludedTerrain, setShowOccludedTerrain] = useState(
+    DEFAULT_SILHOUETTE_SETTINGS.showOccluded
+  );
   const [silhouetteStatus, setSilhouetteStatus] = useState("idle");
   const [silhouetteProfile, setSilhouetteProfile] = useState(null);
   const [silhouetteError, setSilhouetteError] = useState("");
+  const [silhouetteProgress, setSilhouetteProgress] = useState(0);
+  const [silhouetteRetry, setSilhouetteRetry] = useState(0);
+  const [hoveredSilhouettePoint, setHoveredSilhouettePoint] = useState(null);
   const [exclusions, setExclusions] = useLocalStorage(
     STORAGE_KEYS.exclusions,
     []
   );
   const [clues, setClues] = useLocalStorage(STORAGE_KEYS.clues, defaultClues);
   const [savedFilters, setSavedFilters] = useLocalStorage(STORAGE_KEYS.filters, blankFilters);
+  const [basemap, setBasemap] = useLocalStorage(STORAGE_KEYS.basemap, "street");
   const filters = useMemo(() => normalizeFilters(savedFilters), [savedFilters]);
+  const selectedBasemap = BASEMAPS[basemap] || BASEMAPS.street;
 
   const huntBoundary = useMemo(
     () => boundsToPolygon(huntRegion.bounds, huntRegion.name),
@@ -208,15 +269,14 @@ function App() {
         version: 8,
         glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
         sources: {
-          osm: {
+          basemap: {
             type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tiles: selectedBasemap.tiles,
             tileSize: 256,
-            attribution:
-              '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+            attribution: selectedBasemap.attribution,
           },
         },
-        layers: [{ id: "osm", type: "raster", source: "osm" }],
+        layers: [{ id: "basemap", type: "raster", source: "basemap" }],
       },
     });
 
@@ -363,13 +423,39 @@ function App() {
       });
 
       map.addSource("mountain-view", { type: "geojson", data: featureCollection([]) });
+      map.addLayer(
+        {
+          id: "mountain-view-cone",
+          type: "fill",
+          source: "mountain-view",
+          filter: ["==", ["get", "kind"], "cone"],
+          paint: {
+            "fill-color": "#2f6049",
+            "fill-opacity": 0.14,
+          },
+        },
+        "trails-line"
+      );
+      map.addLayer({
+        id: "mountain-view-cone-edge",
+        type: "line",
+        source: "mountain-view",
+        filter: ["in", ["get", "kind"], ["literal", ["cone-edge", "tick"]]],
+        paint: {
+          "line-color": ["coalesce", ["get", "lineColor"], "#2f6049"],
+          "line-width": ["coalesce", ["get", "lineWidth"], 1.5],
+          "line-opacity": 0.84,
+          "line-dasharray": [1.3, 0.9],
+        },
+      });
       map.addLayer({
         id: "mountain-view-heading",
         type: "line",
         source: "mountain-view",
+        filter: ["in", ["get", "kind"], ["literal", ["heading", "hover"]]],
         paint: {
-          "line-color": "#1f3f72",
-          "line-width": 3,
+          "line-color": ["coalesce", ["get", "lineColor"], "#1f3f72"],
+          "line-width": ["coalesce", ["get", "lineWidth"], 3],
           "line-dasharray": [1.4, 0.8],
         },
       });
@@ -377,11 +463,12 @@ function App() {
         id: "mountain-view-point",
         type: "circle",
         source: "mountain-view",
+        filter: ["==", ["geometry-type"], "Point"],
         paint: {
-          "circle-radius": 7,
-          "circle-color": "#ffffff",
-          "circle-stroke-color": "#1f3f72",
-          "circle-stroke-width": 3,
+          "circle-radius": ["coalesce", ["get", "radius"], 7],
+          "circle-color": ["coalesce", ["get", "fillColor"], "#ffffff"],
+          "circle-stroke-color": ["coalesce", ["get", "lineColor"], "#1f3f72"],
+          "circle-stroke-width": ["coalesce", ["get", "lineWidth"], 3],
         },
       });
 
@@ -406,7 +493,24 @@ function App() {
       map.remove();
       mapRef.current = null;
     };
-  }, [cellCoverage, huntBoundary, protectedAreaCollection]);
+  }, [cellCoverage, huntBoundary, protectedAreaCollection, selectedBasemap]);
+
+  useEffect(() => {
+    if (!mapReady) return;
+    const map = mapRef.current;
+    if (map.getLayer("basemap")) map.removeLayer("basemap");
+    if (map.getSource("basemap")) map.removeSource("basemap");
+    map.addSource("basemap", {
+      type: "raster",
+      tiles: selectedBasemap.tiles,
+      tileSize: 256,
+      attribution: selectedBasemap.attribution,
+    });
+    map.addLayer(
+      { id: "basemap", type: "raster", source: "basemap" },
+      "hunt-region-fill"
+    );
+  }, [mapReady, selectedBasemap]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -491,67 +595,122 @@ function App() {
     }
 
     source?.setData(
-      featureCollection([
-        {
-          type: "Feature",
-          properties: {},
-          geometry: {
-            type: "LineString",
-            coordinates: [
-              viewpoint,
-              projectPoint(viewpoint, viewHeadingDegrees, 3),
-            ],
-          },
-        },
-        {
-          type: "Feature",
-          properties: {},
-          geometry: { type: "Point", coordinates: viewpoint },
-        },
-      ])
+      featureCollection(
+        buildMountainViewFeatures({
+          headingDegrees: viewHeadingDegrees,
+          fovDegrees: viewFovDegrees,
+          hoveredPoint: hoveredSilhouettePoint,
+          maxDistanceMiles: viewMaxDistanceMiles,
+          viewpoint,
+        })
+      )
     );
-  }, [mapReady, viewHeadingDegrees, viewpoint]);
+  }, [
+    hoveredSilhouettePoint,
+    mapReady,
+    viewFovDegrees,
+    viewHeadingDegrees,
+    viewMaxDistanceMiles,
+    viewpoint,
+  ]);
 
   useEffect(() => {
     if (!viewpoint) {
       setSilhouetteStatus("idle");
       setSilhouetteProfile(null);
       setSilhouetteError("");
+      setSilhouetteProgress(0);
       return undefined;
     }
 
-    const cacheKey = getSilhouetteCacheKey(viewpoint, viewHeadingDegrees);
+    const cacheKey = getSilhouetteCacheKey({
+      fovDegrees: viewFovDegrees,
+      headingDegrees: viewHeadingDegrees,
+      maxDistanceMiles: viewMaxDistanceMiles,
+      quality: silhouetteQuality,
+      viewpoint,
+    });
     const cached = silhouetteCacheRef.current.get(cacheKey);
     if (cached) {
       setSilhouetteProfile(cached);
       setSilhouetteStatus("ready");
       setSilhouetteError("");
+      setSilhouetteProgress(1);
       return undefined;
     }
 
-    const controller = new AbortController();
+    const savedProfile = readCachedSilhouette(cacheKey);
+    if (savedProfile) {
+      silhouetteCacheRef.current.set(cacheKey, savedProfile);
+      setSilhouetteProfile(savedProfile);
+      setSilhouetteStatus("ready");
+      setSilhouetteError("");
+      setSilhouetteProgress(1);
+      return undefined;
+    }
+
+    const worker = createSilhouetteWorker();
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const timeout = window.setTimeout(() => {
       setSilhouetteStatus("loading");
       setSilhouetteError("");
-      buildSilhouetteProfile(viewpoint, viewHeadingDegrees, controller.signal)
-        .then((profile) => {
-          silhouetteCacheRef.current.set(cacheKey, profile);
-          setSilhouetteProfile(profile);
-          setSilhouetteStatus("ready");
-        })
-        .catch((error) => {
-          if (error.name === "AbortError") return;
-          setSilhouetteProfile(null);
-          setSilhouetteStatus("error");
-          setSilhouetteError(error.message);
+      setSilhouetteProgress(0);
+      worker.postMessage({
+        type: "build",
+        payload: {
+          fovDegrees: viewFovDegrees,
+          headingDegrees: viewHeadingDegrees,
+          maxDistanceMiles: viewMaxDistanceMiles,
+          quality: silhouetteQualityOptions[silhouetteQuality],
+          qualityKey: silhouetteQuality,
+          requestId,
+          viewpoint,
+        },
+      });
+    }, 200);
+
+    worker.onmessage = (event) => {
+      if (event.data?.requestId && event.data.requestId !== requestId) return;
+      if (event.data?.type === "progress") {
+        setSilhouetteProfile({
+          generatedAt: new Date().toISOString(),
+          headingDegrees: normalizeHeading(viewHeadingDegrees),
+          fovDegrees: viewFovDegrees,
+          maxDistanceMiles: viewMaxDistanceMiles,
+          originElevation: event.data.originElevation,
+          profile: event.data.profile,
+          qualityKey: silhouetteQuality,
         });
-    }, 350);
+        setSilhouetteProgress(event.data.progress || 0);
+        setSilhouetteStatus("loading");
+      }
+      if (event.data?.type === "complete") {
+        silhouetteCacheRef.current.set(cacheKey, event.data.profile);
+        writeCachedSilhouette(cacheKey, event.data.profile);
+        setSilhouetteProfile(event.data.profile);
+        setSilhouetteProgress(1);
+        setSilhouetteStatus("ready");
+      }
+      if (event.data?.type === "error") {
+        setSilhouetteProfile(null);
+        setSilhouetteProgress(0);
+        setSilhouetteStatus("error");
+        setSilhouetteError(event.data.error);
+      }
+    };
 
     return () => {
       window.clearTimeout(timeout);
-      controller.abort();
+      worker.terminate();
     };
-  }, [viewHeadingDegrees, viewpoint]);
+  }, [
+    silhouetteQuality,
+    silhouetteRetry,
+    viewFovDegrees,
+    viewHeadingDegrees,
+    viewMaxDistanceMiles,
+    viewpoint,
+  ]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -574,6 +733,8 @@ function App() {
         setSilhouetteStatus("loading");
         setSilhouetteProfile(null);
         setSilhouetteError("");
+        setSilhouetteProgress(0);
+        setHoveredSilhouettePoint(null);
         map.easeTo({ center: point, duration: 500 });
       }
     };
@@ -737,38 +898,50 @@ function App() {
             <p>{huntRegion.name}</p>
             <strong>Rule out known misses, then inspect remaining trail candidates.</strong>
           </div>
-          <div className="tool-group" aria-label="Map drawing tools">
-            <ToolButton
-              active={activeTool === "inspect"}
-              label="Inspect"
-              onClick={() => {
-                setActiveTool("inspect");
-                clearDraft();
-              }}
-            />
-            <ToolButton
-              active={activeTool === "polygon"}
-              label="Polygon"
-              onClick={() => setActiveTool("polygon")}
-            />
-            <ToolButton
-              active={activeTool === "circle"}
-              label="Circle"
-              onClick={() => setActiveTool("circle")}
-            />
-            <ToolButton
-              active={activeTool === "marker"}
-              label="Marker"
-              onClick={() => setActiveTool("marker")}
-            />
-            <ToolButton
-              active={activeTool === "mountain"}
-              label="Mountain View"
-              onClick={() => {
-                setActiveTool("mountain");
-                clearDraft();
-              }}
-            />
+          <div className="topbar-actions">
+            <label className="basemap-select">
+              Map
+              <select value={basemap} onChange={(event) => setBasemap(event.target.value)}>
+                {Object.entries(BASEMAPS).map(([key, option]) => (
+                  <option key={key} value={key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="tool-group" aria-label="Map drawing tools">
+              <ToolButton
+                active={activeTool === "inspect"}
+                label="Inspect"
+                onClick={() => {
+                  setActiveTool("inspect");
+                  clearDraft();
+                }}
+              />
+              <ToolButton
+                active={activeTool === "polygon"}
+                label="Polygon"
+                onClick={() => setActiveTool("polygon")}
+              />
+              <ToolButton
+                active={activeTool === "circle"}
+                label="Circle"
+                onClick={() => setActiveTool("circle")}
+              />
+              <ToolButton
+                active={activeTool === "marker"}
+                label="Marker"
+                onClick={() => setActiveTool("marker")}
+              />
+              <ToolButton
+                active={activeTool === "mountain"}
+                label="Mountain View"
+                onClick={() => {
+                  setActiveTool("mountain");
+                  clearDraft();
+                }}
+              />
+            </div>
           </div>
         </div>
 
@@ -800,17 +973,32 @@ function App() {
           )}
           {viewpoint && (
             <SilhouetteViewer
+              depthFilter={silhouetteDepthFilter}
               headingDegrees={viewHeadingDegrees}
+              fovDegrees={viewFovDegrees}
+              maxDistanceMiles={viewMaxDistanceMiles}
+              progress={silhouetteProgress}
               profile={silhouetteProfile}
+              quality={silhouetteQuality}
+              showOccluded={showOccludedTerrain}
               status={silhouetteStatus}
               error={silhouetteError}
               viewpoint={viewpoint}
+              onDepthFilterChange={setSilhouetteDepthFilter}
               onClose={() => {
                 setViewpoint(null);
                 setSilhouetteProfile(null);
                 setSilhouetteStatus("idle");
+                setSilhouetteProgress(0);
+                setHoveredSilhouettePoint(null);
               }}
+              onFovChange={setViewFovDegrees}
               onHeadingChange={setViewHeadingDegrees}
+              onHoverPoint={setHoveredSilhouettePoint}
+              onMaxDistanceChange={setViewMaxDistanceMiles}
+              onQualityChange={setSilhouetteQuality}
+              onRetry={() => setSilhouetteRetry((current) => current + 1)}
+              onShowOccludedChange={setShowOccludedTerrain}
             />
           )}
         </div>
@@ -1009,38 +1197,79 @@ function App() {
 }
 
 function SilhouetteViewer({
+  depthFilter,
   headingDegrees,
+  fovDegrees,
+  maxDistanceMiles,
+  progress,
   profile,
+  quality,
+  showOccluded,
   status,
   error,
   viewpoint,
+  onDepthFilterChange,
   onClose,
+  onFovChange,
   onHeadingChange,
+  onHoverPoint,
+  onMaxDistanceChange,
+  onQualityChange,
+  onRetry,
+  onShowOccludedChange,
 }) {
   const dragXRef = useRef(null);
-  const points = profile?.profile || EMPTY_PROFILE_POINTS;
+  const allPoints = profile?.profile || EMPTY_PROFILE_POINTS;
+  const filteredFeaturePoints = useMemo(
+    () => filterProfilePoints(allPoints, depthFilter),
+    [allPoints, depthFilter]
+  );
   const angleRange = useMemo(() => {
-    if (!points.length) return { min: -2, max: 10 };
-    const values = points.map((point) => point.angleDegrees);
+    if (!allPoints.length) return { min: -2, max: 10 };
+    const values = allPoints.map((point) => point.angleDegrees);
     return {
       min: Math.min(-2, Math.min(...values) - 1),
       max: Math.max(8, Math.max(...values) + 1),
     };
-  }, [points]);
-  const skylinePath = useMemo(() => {
-    if (!points.length) return "";
+  }, [allPoints]);
+  const plottedPoints = useMemo(() => {
     const width = 420;
     const height = 150;
-    const xStep = width / Math.max(points.length - 1, 1);
+    const fovStart = -fovDegrees / 2;
     const yScale = height / Math.max(angleRange.max - angleRange.min, 1);
-    return points
-      .map((point, index) => {
-        const x = index * xStep;
-        const y = height - (point.angleDegrees - angleRange.min) * yScale;
-        return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-      })
-      .join(" ");
-  }, [angleRange, points]);
+    return allPoints.map((point) => {
+      const x = ((point.offsetDegrees - fovStart) / fovDegrees) * width;
+      const y = height - (point.angleDegrees - angleRange.min) * yScale;
+      return { ...point, x, y };
+    });
+  }, [allPoints, angleRange, fovDegrees]);
+  const featurePoints = useMemo(() => {
+    const allowedBearings = new Set(
+      filteredFeaturePoints
+        .filter((point) => point.isInteresting)
+        .map((point) => point.bearingDegrees)
+    );
+    return plottedPoints.filter(
+      (point) =>
+        !point.isGap && point.isInteresting && allowedBearings.has(point.bearingDegrees)
+    );
+  }, [filteredFeaturePoints, plottedPoints]);
+  const visibleSegments = useMemo(() => {
+    if (plottedPoints.length < 2) return [];
+    return plottedPoints.slice(1).flatMap((point, index) => {
+      const previous = plottedPoints[index];
+      if (point.isGap || previous.isGap) return [];
+      return [
+        {
+          from: previous,
+          to: point,
+          color: getDepthColor(point.distanceMiles, point.elevationMeters),
+          highlighted: pointMatchesDepthFilter(point, depthFilter),
+          width: 1.6 + point.prominenceScore * 3.2,
+        },
+      ];
+    });
+  }, [depthFilter, plottedPoints]);
 
   const updateHeading = (nextHeading) => onHeadingChange(normalizeHeading(nextHeading));
   const handleProfilePointerDown = (event) => {
@@ -1066,14 +1295,18 @@ function SilhouetteViewer({
     updateHeading((Math.atan2(dx, -dy) * 180) / Math.PI);
   };
 
+  const selectedPoint =
+    featurePoints.find((point) => point.prominenceScore >= 0.55) || featurePoints[0] || null;
+
   return (
     <section className="map-floating silhouette-panel" aria-label="Mountain silhouette viewer">
       <div className="silhouette-heading">
         <div>
-          <h2>Mountain View</h2>
+          <h2>Silhouette View</h2>
           <p>
             {viewpoint[1].toFixed(4)}, {viewpoint[0].toFixed(4)} ·{" "}
-            {Math.round(normalizeHeading(headingDegrees))}° {formatHeading(headingDegrees)}
+            {Math.round(normalizeHeading(headingDegrees))}° {formatHeading(headingDegrees)} ·{" "}
+            {fovDegrees}° FOV
           </p>
         </div>
         <button type="button" onClick={onClose} aria-label="Close mountain view">
@@ -1081,40 +1314,183 @@ function SilhouetteViewer({
         </button>
       </div>
 
+      <div className="silhouette-controls">
+        <label>
+          Heading
+          <input
+            type="range"
+            min="0"
+            max="359"
+            value={Math.round(normalizeHeading(headingDegrees))}
+            onChange={(event) => updateHeading(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          FOV
+          <input
+            type="range"
+            min="30"
+            max="120"
+            step="5"
+            value={fovDegrees}
+            onChange={(event) => onFovChange(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          Distance
+          <input
+            type="range"
+            min="20"
+            max="120"
+            step="5"
+            value={maxDistanceMiles}
+            onChange={(event) => onMaxDistanceChange(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          Quality
+          <select value={quality} onChange={(event) => onQualityChange(event.target.value)}>
+            {Object.entries(silhouetteQualityOptions).map(([key, option]) => (
+              <option key={key} value={key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="silhouette-filter-row" aria-label="Silhouette filters">
+        {[
+          ["all", "All"],
+          ["foreground", "Foreground"],
+          ["midground", "Midground"],
+          ["background", "Background"],
+          ["major", "Major"],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            className={depthFilter === key ? "active" : ""}
+            onClick={() => onDepthFilterChange(key)}
+          >
+            {label}
+          </button>
+        ))}
+        <label className="silhouette-toggle">
+          <input
+            type="checkbox"
+            checked={showOccluded}
+            onChange={(event) => onShowOccludedChange(event.target.checked)}
+          />
+          Occluded
+        </label>
+      </div>
+
       <div className="silhouette-body">
         <div className="silhouette-chart">
           <svg
             viewBox="0 0 420 170"
             role="img"
-            aria-label="Approximate skyline profile"
+            aria-label="DEM-backed skyline profile"
             onPointerDown={handleProfilePointerDown}
             onPointerMove={handleProfilePointerMove}
             onPointerUp={stopDragging}
             onPointerCancel={stopDragging}
+            onPointerLeave={() => {
+              stopDragging();
+              onHoverPoint(null);
+            }}
           >
             <rect width="420" height="170" rx="6" className="skyline-sky" />
             <path d="M 0 150 L 420 150" className="skyline-horizon" />
-            {points.length ? (
-              <>
-                <path
-                  d={`${skylinePath} L 420 170 L 0 170 Z`}
-                  className="skyline-fill"
+            <g className="bearing-ticks" aria-hidden="true">
+              {[0, 0.25, 0.5, 0.75, 1].map((ratio) => (
+                <line
+                  key={ratio}
+                  x1={ratio * 420}
+                  x2={ratio * 420}
+                  y1="8"
+                  y2="150"
                 />
-                <path d={skylinePath} className="skyline-line" />
+              ))}
+            </g>
+            {showOccluded &&
+              plottedPoints.flatMap((point) =>
+                (point.occluded || []).slice(0, 2).map((occluded, index) => {
+                  const yScale = 150 / Math.max(angleRange.max - angleRange.min, 1);
+                  const y = 150 - (occluded.angleDegrees - angleRange.min) * yScale;
+                  return (
+                    <circle
+                      key={`${point.bearingDegrees}-${index}`}
+                      cx={point.x}
+                      cy={y}
+                      r="1.7"
+                      className="skyline-occluded"
+                    />
+                  );
+                })
+              )}
+            {plottedPoints.length ? (
+              <>
+                {visibleSegments.map((segment) => (
+                  <line
+                    key={`${segment.from.bearingDegrees}-${segment.to.bearingDegrees}`}
+                    x1={segment.from.x}
+                    y1={segment.from.y}
+                    x2={segment.to.x}
+                    y2={segment.to.y}
+                    className="skyline-line"
+                    style={{
+                      stroke: segment.color,
+                      strokeWidth: segment.width,
+                      opacity: segment.highlighted ? 1 : 0.22,
+                    }}
+                  />
+                ))}
+                {featurePoints.map((point) => (
+                  <circle
+                    key={point.bearingDegrees}
+                    cx={point.x}
+                    cy={point.y}
+                    r={4.2 + point.prominenceScore * 2.2}
+                    className="skyline-point"
+                    style={{ fill: getDepthColor(point.distanceMiles, point.elevationMeters) }}
+                    onPointerEnter={() => onHoverPoint(point)}
+                    onPointerLeave={() => onHoverPoint(null)}
+                  >
+                    <title>
+                      {point.name || point.featureLabel || "Skyline peak"} ·{" "}
+                      {formatDistance(point.distanceMiles)} ·{" "}
+                      {Math.round(point.elevationMeters)} m ·{" "}
+                      {point.angleDegrees.toFixed(1)}°
+                    </title>
+                  </circle>
+                ))}
               </>
             ) : (
               <path d="M 0 142 L 420 142" className="skyline-line muted" />
             )}
           </svg>
+          <div className="silhouette-progress" aria-hidden="true">
+            <span style={{ width: `${Math.round(progress * 100)}%` }} />
+          </div>
           <div className="silhouette-status">
             {status === "idle" && "Pick a map point to generate a skyline."}
-            {status === "loading" && "Sampling Open-Meteo elevation..."}
+            {status === "loading" &&
+              `Sampling OpenZenith terrain... ${Math.round(progress * 100)}%`}
             {status === "ready" &&
-              `${points.length} bearings · observer ${Math.round(profile.originElevation)} m`}
-            {status === "error" && (error || "Could not generate this skyline.")}
+              `${allPoints.length} bearings · ${featurePoints.length} skyline features · observer ${Math.round(profile.originElevation)} m`}
+            {status === "error" && (
+              <>
+                {error || "Could not generate this skyline."}{" "}
+                <button type="button" onClick={onRetry}>
+                  Retry
+                </button>
+              </>
+            )}
           </div>
           <p className="silhouette-attribution">
-            Elevation data: Open-Meteo and Copernicus DEM GLO-90.
+            Elevation data: OpenZenith DEM tiles, with point-query fallback.
           </p>
         </div>
 
@@ -1148,6 +1524,18 @@ function SilhouetteViewer({
               Right
             </button>
           </div>
+          {selectedPoint && (
+            <dl className="silhouette-readout">
+              <dt>Layer</dt>
+              <dd>{getDepthLabel(selectedPoint.distanceMiles)}</dd>
+              <dt>Distance</dt>
+              <dd>{formatDistance(selectedPoint.distanceMiles)}</dd>
+              <dt>Elevation</dt>
+              <dd>{Math.round(selectedPoint.elevationMeters)} m</dd>
+              <dt>Angle</dt>
+              <dd>{selectedPoint.angleDegrees.toFixed(1)}°</dd>
+            </dl>
+          )}
         </div>
       </div>
     </section>
@@ -1293,6 +1681,143 @@ function trailIntersectsExclusion(trail, exclusion) {
   return trail.geometry.coordinates.some((point) =>
     pointInPolygon(point, exclusion.geometry.coordinates[0])
   );
+}
+
+function buildMountainViewFeatures({
+  headingDegrees,
+  fovDegrees,
+  hoveredPoint,
+  maxDistanceMiles,
+  viewpoint,
+}) {
+  const startBearing = headingDegrees - fovDegrees / 2;
+  const endBearing = headingDegrees + fovDegrees / 2;
+  const coneCoordinates = [viewpoint];
+  const coneSteps = Math.max(10, Math.ceil(fovDegrees / 5));
+
+  for (let step = 0; step <= coneSteps; step += 1) {
+    const bearing = startBearing + (fovDegrees * step) / coneSteps;
+    coneCoordinates.push(projectPoint(viewpoint, bearing, maxDistanceMiles));
+  }
+  coneCoordinates.push(viewpoint);
+
+  const features = [
+    {
+      type: "Feature",
+      properties: { kind: "cone" },
+      geometry: { type: "Polygon", coordinates: [coneCoordinates] },
+    },
+    {
+      type: "Feature",
+      properties: { kind: "cone-edge", lineColor: "#2f6049", lineWidth: 2 },
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          projectPoint(viewpoint, startBearing, maxDistanceMiles),
+          viewpoint,
+          projectPoint(viewpoint, endBearing, maxDistanceMiles),
+        ],
+      },
+    },
+    {
+      type: "Feature",
+      properties: { kind: "heading", lineColor: "#1f3f72", lineWidth: 3 },
+      geometry: {
+        type: "LineString",
+        coordinates: [viewpoint, projectPoint(viewpoint, headingDegrees, maxDistanceMiles)],
+      },
+    },
+    {
+      type: "Feature",
+      properties: {
+        kind: "viewpoint",
+        fillColor: "#ffffff",
+        lineColor: "#1f3f72",
+        lineWidth: 3,
+        radius: 7,
+      },
+      geometry: { type: "Point", coordinates: viewpoint },
+    },
+  ];
+
+  for (let offset = -Math.floor(fovDegrees / 2); offset <= fovDegrees / 2; offset += 10) {
+    const bearing = headingDegrees + offset;
+    features.push({
+      type: "Feature",
+      properties: { kind: "tick", lineColor: "#6b7f71", lineWidth: offset === 0 ? 0 : 1 },
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          projectPoint(viewpoint, bearing, Math.max(maxDistanceMiles - 3, 1)),
+          projectPoint(viewpoint, bearing, maxDistanceMiles),
+        ],
+      },
+    });
+  }
+
+  if (hoveredPoint?.coordinate) {
+    features.push(
+      {
+        type: "Feature",
+        properties: { kind: "hover", lineColor: "#c85f2d", lineWidth: 3 },
+        geometry: {
+          type: "LineString",
+          coordinates: [viewpoint, hoveredPoint.coordinate],
+        },
+      },
+      {
+        type: "Feature",
+        properties: {
+          kind: "hover-point",
+          fillColor: getDepthColor(
+            hoveredPoint.distanceMiles,
+            hoveredPoint.elevationMeters
+          ),
+          lineColor: "#ffffff",
+          lineWidth: 2,
+          radius: 6,
+        },
+        geometry: { type: "Point", coordinates: hoveredPoint.coordinate },
+      }
+    );
+  }
+
+  return features;
+}
+
+function pointMatchesDepthFilter(point, depthFilter) {
+  if (point.isGap) return false;
+  if (depthFilter === "all") return true;
+  if (depthFilter === "foreground") return point.distanceMiles <= 18;
+  if (depthFilter === "midground") {
+    return point.distanceMiles > 18 && point.distanceMiles <= 45;
+  }
+  if (depthFilter === "background") return point.distanceMiles > 45;
+  if (depthFilter === "major") return point.isInteresting;
+  return true;
+}
+
+function readCachedSilhouette(cacheKey) {
+  try {
+    const raw = window.localStorage.getItem(`treasure-hunt.silhouette.${cacheKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.profile)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedSilhouette(cacheKey, profile) {
+  try {
+    window.localStorage.setItem(
+      `treasure-hunt.silhouette.${cacheKey}`,
+      JSON.stringify(profile)
+    );
+  } catch {
+    // Local storage may be full; DEM tiles still use the browser Cache API.
+  }
 }
 
 function formatHeading(degrees) {

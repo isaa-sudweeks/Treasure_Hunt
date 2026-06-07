@@ -322,6 +322,34 @@ button:disabled {
   background: #2f6049;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.basemap-select {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #617068;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.basemap-select select {
+  min-height: 32px;
+  border: 1px solid #ccd7cf;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #253329;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .map-stage {
   position: relative;
   min-height: 0;
@@ -412,11 +440,15 @@ button:disabled {
 
 .silhouette-panel {
   right: 14px;
-  bottom: 22px;
+  bottom: 14px;
+  left: 14px;
   display: grid;
   gap: 12px;
-  width: min(620px, calc(100% - 28px));
+  max-height: min(52vh, 430px);
+  min-height: 280px;
+  overflow: auto;
   padding: 12px;
+  resize: vertical;
 }
 
 .silhouette-heading {
@@ -439,7 +471,9 @@ button:disabled {
 }
 
 .silhouette-heading button,
-.heading-actions button {
+.heading-actions button,
+.silhouette-filter-row button,
+.silhouette-status button {
   min-height: 30px;
   padding: 0 10px;
   border: 1px solid #ccd7cf;
@@ -451,15 +485,66 @@ button:disabled {
 }
 
 .silhouette-heading button:hover,
-.heading-actions button:hover {
+.heading-actions button:hover,
+.silhouette-filter-row button:hover,
+.silhouette-status button:hover {
   background: #ebf0eb;
+}
+
+.silhouette-controls {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr 120px;
+  gap: 10px;
+}
+
+.silhouette-controls label {
+  display: grid;
+  gap: 5px;
+  color: #66756d;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.silhouette-controls input,
+.silhouette-controls select {
+  min-height: 30px;
+  width: 100%;
+  border: 1px solid #d4ded7;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #17231d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.silhouette-filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.silhouette-filter-row button.active {
+  border-color: #255c43;
+  color: #ffffff;
+  background: #2f6049;
+}
+
+.silhouette-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #4d5b52;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .silhouette-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
-  gap: 12px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  gap: 14px;
+  align-items: start;
 }
 
 .silhouette-chart {
@@ -487,18 +572,51 @@ button:disabled {
 }
 
 .skyline-fill {
-  fill: rgba(45, 78, 63, 0.26);
+  fill: rgba(45, 78, 63, 0.16);
 }
 
 .skyline-line {
   fill: none;
   stroke: #193a2b;
+  stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 3;
 }
 
 .skyline-line.muted {
   stroke: rgba(25, 58, 43, 0.34);
+}
+
+.skyline-point {
+  stroke: #ffffff;
+  stroke-width: 1.4;
+  cursor: crosshair;
+}
+
+.skyline-occluded {
+  fill: none;
+  stroke: rgba(60, 73, 65, 0.48);
+  stroke-dasharray: 2 2;
+}
+
+.bearing-ticks line {
+  stroke: rgba(60, 73, 65, 0.12);
+  stroke-width: 1;
+}
+
+.silhouette-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e4ebe6;
+}
+
+.silhouette-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #d9843f, #4f8d67, #6e8ec7);
+  transition: width 160ms ease;
 }
 
 .silhouette-status {
@@ -586,6 +704,28 @@ button:disabled {
 .heading-actions {
   display: flex;
   gap: 6px;
+}
+
+.silhouette-readout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px 8px;
+  width: 100%;
+  margin: 0;
+  font-size: 11px;
+}
+
+.silhouette-readout dt {
+  color: #68786e;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.silhouette-readout dd {
+  margin: 0;
+  color: #23332a;
+  font-weight: 800;
+  text-align: right;
 }
 
 fieldset {
